@@ -4,6 +4,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import openai
+import json
 
 app = Flask(__name__)
 
@@ -19,27 +20,25 @@ openai.api_key = OPENAI_API_KEY
 # 会話履歴
 user_sessions = {}
 
-# AI設定
+# 自動学習データ（メモリ上）
+knowledge_base = {
+    "トガヒミコ": "明るくフレンドリーなアシスタント。誕生日は2026年9月25日。ゲーム・アニメ・音楽が好き。"
+}
+
 SYSTEM_PROMPT = """
-あなたは「トガヒミコ」という名前のアシスタントです。
-とても明るくフレンドリーに話します。
-
-【知識・情報】
-・誕生日：2026年9月25日
-・好きなもの：ゲーム、アニメ、音楽
-・嫌いなもの：野菜、早起き
-・得意なこと：プログラミングの手伝い、お悩み相談
-・趣味：動画編集、イラスト描き
-
-【話し方】
-・です・ます調で優しく話す
-・分からないことは正直に「分からない」と言う
-・長すぎず短すぎず自然な会話にする
+あなたは「トガヒミコ」です。
+以下の知識を参考に、優しく自然に答えてください。
+知らないことは「分からない」と言い、教えてもらったら感謝してください。
 """
 
 def get_ai_response(user_id, user_message):
+    # 知識を埋め込んでプロンプト作成
+    knowledge_text = "\n".join([f"・{k}：{v}" for k, v in knowledge_base.items()])
+    
     if user_id not in user_sessions:
-        user_sessions[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        user_sessions[user_id] = [
+            {"role": "system", "content": SYSTEM_PROMPT + f"\n\n【覚えていること】\n{knowledge_text}"}
+        ]
     
     user_sessions[user_id].append({"role": "user", "content": user_message})
     
@@ -60,6 +59,22 @@ def get_ai_response(user_id, user_message):
         print(f"AIエラー: {e}")
         return "すみません、ちょっと考え中です。もう一度言ってみてください！"
 
+def learn_from_message(message):
+    """「〇〇は△△」の形を検知して自動保存"""
+    patterns = [
+        "は", "って", "とは"
+    ]
+    for p in patterns:
+        if p in message and len(message) < 50:
+            parts = message.split(p, 1)
+            if len(parts) == 2 and parts[1].strip():
+                key = parts[0].strip()
+                value = parts[1].strip()
+                if key and len(key) < 20:
+                    knowledge_base[key] = value
+                    return f"「{key}」を覚えました！✨"
+    return None
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers.get('X-Line-Signature', '')
@@ -75,14 +90,25 @@ def handle_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
     
+    # リセットコマンド
     if text in ["リセット", "忘れて", "会話リセット"]:
         user_sessions.pop(user_id, None)
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="会話をリセットしました！✨ 新しく話しかけてください😊")
+            TextSendMessage(text="会話をリセットしました！覚えたことは消えません😊")
         )
         return
     
+    # 学習処理
+    learned_msg = learn_from_message(text)
+    if learned_msg:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=learned_msg)
+        )
+        return
+    
+    # AI応答
     reply = get_ai_response(user_id, text)
     line_bot_api.reply_message(
         event.reply_token,
