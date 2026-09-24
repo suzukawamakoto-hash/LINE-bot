@@ -29,19 +29,14 @@ SYSTEM_PROMPT = """
 """
 
 def extract_knowledge(text):
-    """文を分割して個別に学習"""
-    # 質問っぽい文はスキップ
     if re.search(r"[？?何誰いつどこなぜどう教え]", text):
         return []
-    
     results = []
-    # 句読点や改行で分割
     sentences = re.split(r"[。\n]", text)
     for sent in sentences:
         sent = sent.strip()
         if not sent:
             continue
-        # 「〇〇は△△」の形を検知
         m = re.match(r".*?([^\s]+)は(.+)", sent)
         if m:
             key = m.group(1).strip()
@@ -101,7 +96,6 @@ def handle_msg(event):
         )
         return
     
-    # 複数の情報をまとめて学習
     learned = extract_knowledge(txt)
     if learned:
         msgs = []
@@ -114,7 +108,6 @@ def handle_msg(event):
         )
         return
     
-    # AI応答
     reply = get_ai_response(uid, txt)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
