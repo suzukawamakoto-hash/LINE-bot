@@ -3,75 +3,26 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
-import openai
-import re
+from datetime import datetime
 
 app = Flask(__name__)
 
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
 
-user_sessions = {}
-knowledge_base = {
-    "トガヒミコ": "明るくフレンドリーなアシスタント。誕生日は2026年9月25日。ゲーム・アニメ・音楽が好き。"
-}
+# 掲示板データ保存用
+board_posts = []  # 形式：[{"user_id": "...", "user_name": "...", "text": "...", "time": "..."}]
 
-SYSTEM_PROMPT = """
-あなたは「トガヒミコ」です。
-親切で明るく、自然な日本語で話してください。
-教えてもらったことは覚え、次からは自分の知識として答えてください。
-質問されたら、覚えていることを使って答えてください。
-"""
-
-def extract_knowledge(text):
-    if re.search(r"[？?何誰いつどこなぜどう教え]", text):
-        return []
-    results = []
-    sentences = re.split(r"[。\n]", text)
-    for sent in sentences:
-        sent = sent.strip()
-        if not sent:
-            continue
-        m = re.match(r".*?([^\s]+)は(.+)", sent)
-        if m:
-            key = m.group(1).strip()
-            val = m.group(2).strip()
-            if (len(key) <= 30 and len(val) >= 2 
-                and not re.search(r"[？?いつ何]", val)):
-                results.append((key, val))
-    return results
-
-def get_ai_response(user_id, msg):
-    know_text = "\n".join([f"・{k}：{v}" for k, v in knowledge_base.items()])
-    
-    if user_id not in user_sessions:
-        user_sessions[user_id] = [
-            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n【覚えていること】\n{know_text}"}
-        ]
-    
-    user_sessions[user_id].append({"role": "user", "content": msg})
-    
-    if len(user_sessions[user_id]) > 25:
-        user_sessions[user_id] = [user_sessions[user_id][0]] + user_sessions[user_id][-20:]
-    
+def get_user_name(user_id):
+    """ユーザー名取得（簡易版）"""
     try:
-        res = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=user_sessions[user_id],
-            temperature=0.9,
-            max_tokens=1200
-        )
-        ans = res.choices[0].message.content.strip()
-        user_sessions[user_id].append({"role": "assistant", "content": ans})
-        return ans
-    except Exception as e:
-        print(f"AIエラー: {e}")
-        return "すみません、ちょっと考え中です。もう一度言ってみてください！"
+        profile = line_bot_api.get_profile(user_id)
+        return profile.display_name
+    except:
+        return "名無しさん"
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -87,29 +38,75 @@ def callback():
 def handle_msg(event):
     uid = event.source.user_id
     txt = event.message.text.strip()
-    
-    if txt in ["リセット", "忘れて", "履歴消去"]:
-        user_sessions.pop(uid, None)
+
+    # === 掲示板：投稿 ===
+    if txt.startswith("/掲示板 "):
+        content = txt[len("/掲示板 "):].strip()
+        if not content:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="📝 投稿内容を入れてね！\n例：/掲示板 今日のおすすめアニメ")
+            )
+            return
+        
+        user_name = get_user_name(uid)
+        now = datetime.now().strftime("%m/%d %H:%M")
+        
+        board_posts.append({
+            "user_id": uid,
+            "user_name": user_name,
+            "text": content,
+            "time": now
+        })
+        
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="会話履歴を消しました！覚えたことはそのままだよ😊")
+            TextSendMessage(text=f"✅ 掲示板に投稿しました！\n\n【{user_name}】\n{content}")
         )
         return
-    
-    learned = extract_knowledge(txt)
-    if learned:
-        msgs = []
-        for key, val in learned:
-            knowledge_base[key] = val
-            msgs.append(f"「{key}」覚えたよ！✨")
+
+    # === 掲示板：一覧表示 ===
+    elif txt in ["/掲示板みる", "/掲示板一覧", "/掲示板"]:
+        if not board_posts:
+            msg = "📭 まだ投稿がありません\n/掲示板 メッセージ で投稿してね！"
+        else:
+            msg = "📋 掲示板一覧\n" + "―"*1 + "\n"
+            for i, post in enumerate(reversed(board_posts[-15:]), 1):
+                msg += f"[{i}] {post['user_name']}｜{post['time']}\n{post['text']}\n\n"
+            if len(board_posts) > 15:
+                msg += f"他 {len(board_posts)-15}件 省略しています"
+        
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="\n".join(msgs))
+            TextSendMessage(text=msg)
         )
         return
-    
-    reply = get_ai_response(uid, txt)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+
+    # === 掲示板：自分の最新を削除 ===
+    elif txt == "/掲示板消す":
+        removed = False
+        for i in range(len(board_posts)-1, -1, -1):
+            if board_posts[i]["user_id"] == uid:
+                board_posts.pop(i)
+                removed = True
+                break
+        
+        if removed:
+            reply = "🗑️ 最後の投稿を削除しました"
+        else:
+            reply = "📭 削除できる投稿が見つかりません"
+        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=reply)
+        )
+        return
+
+    # === 通常会話（トガヒミコ）===
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=f"こんにちは！掲示板Botだよ✨\n\n📝 使い方\n/掲示板 メッセージ → 投稿\n/掲示板みる → 一覧\n/掲示板消す → 自分の最新を削除")
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
