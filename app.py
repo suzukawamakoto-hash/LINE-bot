@@ -1,4 +1,4 @@
-from flask import Flask, request, abort
+from flask import Flask, request, abort, render_template_string
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -13,17 +13,55 @@ CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-# 掲示板データ保存用
-board_posts = []  # 形式：[{"user_id": "...", "user_name": "...", "text": "...", "time": "..."}]
+posts = []  # 掲示板データ
 
-def get_user_name(user_id):
-    """ユーザー名取得（簡易版）"""
+# ウェブページテンプレート
+HTML = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>ネット掲示板</title>
+    <style>
+        body{font-family:sans-serif;max-width:700px;margin:0 auto;padding:20px;background:#f5f5f5}
+        h1{text-align:center;color:#222}
+        .post{background:white;margin:10px 0;padding:15px;border-radius:10px;box-shadow:0 2px 4px #0001}
+        .title{font-weight:bold;font-size:1.1em;color:#2c3e50}
+        .meta{color:#777;font-size:0.85em;margin:5px 0}
+        .body{margin-top:10px;line-height:1.6}
+        .empty{text-align:center;color:#888;padding:30px}
+    </style>
+</head>
+<body>
+    <h1>🌐 公開掲示板</h1>
+    {% if posts %}
+        {% for p in posts|reverse %}
+        <div class="post">
+            <div class="title">{{p.title}}</div>
+            <div class="meta">{{p.name}} ・ {{p.time}}</div>
+            <div class="body">{{p.body}}</div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p class="empty">まだ投稿がありません。LINE Botから投稿しよう！</p>
+    {% endif %}
+</body>
+</html>
+"""
+
+def get_name(uid):
     try:
-        profile = line_bot_api.get_profile(user_id)
-        return profile.display_name
+        return line_bot_api.get_profile(uid).display_name
     except:
-        return "名無しさん"
+        return "名無し"
 
+# ウェブ公開ページ
+@app.route("/")
+def index():
+    return render_template_string(HTML, posts=posts)
+
+# LINE Webhook
 @app.route("/callback", methods=["POST"])
 def callback():
     sig = request.headers.get("X-Line-Signature", "")
@@ -35,77 +73,28 @@ def callback():
     return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_msg(event):
+def handle(event):
     uid = event.source.user_id
     txt = event.message.text.strip()
 
-    # === 掲示板：投稿 ===
-    if txt.startswith("/掲示板 "):
-        content = txt[len("/掲示板 "):].strip()
-        if not content:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="📝 投稿内容を入れてね！\n例：/掲示板 今日のおすすめアニメ")
-            )
-            return
-        
-        user_name = get_user_name(uid)
-        now = datetime.now().strftime("%m/%d %H:%M")
-        
-        board_posts.append({
-            "user_id": uid,
-            "user_name": user_name,
-            "text": content,
-            "time": now
+    if txt.startswith("/投稿 "):
+        content = txt[4:].strip()
+        title, body = (content.split("｜", 1) + ["無題"])[:2]
+        name = get_name(uid)
+        now = datetime.now().strftime("%Y/%m/%d %H:%M")
+        posts.append({
+            "title": title, "body": body, "name": name, "time": now
         })
-        
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=f"✅ 掲示板に投稿しました！\n\n【{user_name}】\n{content}")
+            TextSendMessage(text=f"✅ 投稿しました！\n公開URL：\n{request.url_root}")
         )
         return
 
-    # === 掲示板：一覧表示 ===
-    elif txt in ["/掲示板みる", "/掲示板一覧", "/掲示板"]:
-        if not board_posts:
-            msg = "📭 まだ投稿がありません\n/掲示板 メッセージ で投稿してね！"
-        else:
-            msg = "📋 掲示板一覧\n" + "―"*1 + "\n"
-            for i, post in enumerate(reversed(board_posts[-15:]), 1):
-                msg += f"[{i}] {post['user_name']}｜{post['time']}\n{post['text']}\n\n"
-            if len(board_posts) > 15:
-                msg += f"他 {len(board_posts)-15}件 省略しています"
-        
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=msg)
-        )
-        return
-
-    # === 掲示板：自分の最新を削除 ===
-    elif txt == "/掲示板消す":
-        removed = False
-        for i in range(len(board_posts)-1, -1, -1):
-            if board_posts[i]["user_id"] == uid:
-                board_posts.pop(i)
-                removed = True
-                break
-        
-        if removed:
-            reply = "🗑️ 最後の投稿を削除しました"
-        else:
-            reply = "📭 削除できる投稿が見つかりません"
-        
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply)
-        )
-        return
-
-    # === 通常会話（トガヒミコ）===
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=f"こんにちは！掲示板Botだよ✨\n\n📝 使い方\n/掲示板 メッセージ → 投稿\n/掲示板みる → 一覧\n/掲示板消す → 自分の最新を削除")
+        TextSendMessage(text="🌐 掲示板Bot\n\n"
+            "/投稿 タイトル｜内容\n→ ウェブに公開されます！")
     )
 
 if __name__ == "__main__":
