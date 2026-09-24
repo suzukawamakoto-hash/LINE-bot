@@ -4,7 +4,7 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import openai
-import json
+import re
 
 app = Flask(__name__)
 
@@ -17,103 +17,107 @@ line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 openai.api_key = OPENAI_API_KEY
 
-# 会話履歴
+# 会話履歴・知識
 user_sessions = {}
+knowledge_base = {}
 
-# 自動学習データ（メモリ上）
-knowledge_base = {
-    "トガヒミコ": "明るくフレンドリーなアシスタント。誕生日は2026年9月25日。ゲーム・アニメ・音楽が好き。"
+# 最初に覚えていること
+INIT_KNOWLEDGE = {
+    "トガヒミコ": "明るくフレンドリーなアシスタント。誕生日は2026年9月25日。ゲーム・アニメ・音楽が好き。",
 }
+knowledge_base.update(INIT_KNOWLEDGE)
 
 SYSTEM_PROMPT = """
 あなたは「トガヒミコ」です。
-以下の知識を参考に、優しく自然に答えてください。
-知らないことは「分からない」と言い、教えてもらったら感謝してください。
+ユーザーが「〇〇は△△」「〇〇って△△だよ」と教えてくれたら、必ず覚えてください。
+知らないことは「分からない」と正直に言い、教えてもらったら嬉しそうに返事してください。
 """
 
-def get_ai_response(user_id, user_message):
-    # 知識を埋め込んでプロンプト作成
-    knowledge_text = "\n".join([f"・{k}：{v}" for k, v in knowledge_base.items()])
+def extract_knowledge(text):
+    """いろんな言い方から知識を抜き出す"""
+    patterns = [
+        r"([^\s。]+)は(.+)",        # りんごは赤い
+        r"([^\s。]+)って(.+)",       # りんごって赤い
+        r"([^\s。]+)とは(.+)",       # りんごとは赤いもの
+        r"私の([^\s。]+)は(.+)",     # 私の名前は〇〇
+        r"僕の([^\s。]+)は(.+)",     # 僕の好きなものはゲーム
+        r"([^\s。]+)＝(.+)",         # 好きな色＝ピンク
+    ]
+    for pat in patterns:
+        m = re.match(pat, text)
+        if m:
+            key = m.group(1).strip()
+            val = m.group(2).strip()
+            if len(key) <= 30 and len(val) <= 100 and key and val:
+                return key, val
+    return None, None
+
+def get_ai_response(user_id, msg):
+    # 知識を全部まとめて渡す
+    know_text = "\n".join([f"・{k}：{v}" for k, v in knowledge_base.items()])
     
     if user_id not in user_sessions:
         user_sessions[user_id] = [
-            {"role": "system", "content": SYSTEM_PROMPT + f"\n\n【覚えていること】\n{knowledge_text}"}
+            {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n【覚えていること】\n{know_text}"}
         ]
     
-    user_sessions[user_id].append({"role": "user", "content": user_message})
+    user_sessions[user_id].append({"role": "user", "content": msg})
     
-    if len(user_sessions[user_id]) > 22:
+    # 会話が長くなりすぎたら整理
+    if len(user_sessions[user_id]) > 25:
         user_sessions[user_id] = [user_sessions[user_id][0]] + user_sessions[user_id][-20:]
     
     try:
-        response = openai.chat.completions.create(
+        res = openai.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=user_sessions[user_id],
             temperature=0.9,
             max_tokens=1200
         )
-        ai_reply = response.choices[0].message.content.strip()
-        user_sessions[user_id].append({"role": "assistant", "content": ai_reply})
-        return ai_reply
+        ans = res.choices[0].message.content.strip()
+        user_sessions[user_id].append({"role": "assistant", "content": ans})
+        return ans
     except Exception as e:
         print(f"AIエラー: {e}")
         return "すみません、ちょっと考え中です。もう一度言ってみてください！"
 
-def learn_from_message(message):
-    """「〇〇は△△」の形を検知して自動保存"""
-    patterns = [
-        "は", "って", "とは"
-    ]
-    for p in patterns:
-        if p in message and len(message) < 50:
-            parts = message.split(p, 1)
-            if len(parts) == 2 and parts[1].strip():
-                key = parts[0].strip()
-                value = parts[1].strip()
-                if key and len(key) < 20:
-                    knowledge_base[key] = value
-                    return f"「{key}」を覚えました！✨"
-    return None
-
-@app.route("/callback", methods=['POST'])
+@app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    sig = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     try:
-        handler.handle(body, signature)
+        handler.handle(body, sig)
     except InvalidSignatureError:
         abort(400)
-    return 'OK'
+    return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    user_id = event.source.user_id
-    text = event.message.text.strip()
+def handle_msg(event):
+    uid = event.source.user_id
+    txt = event.message.text.strip()
     
-    # リセットコマンド
-    if text in ["リセット", "忘れて", "会話リセット"]:
-        user_sessions.pop(user_id, None)
+    # リセット
+    if txt in ["リセット", "忘れて", "履歴消去"]:
+        user_sessions.pop(uid, None)
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="会話をリセットしました！覚えたことは消えません😊")
+            TextSendMessage(text="会話履歴を消しました！覚えたことはそのままだよ😊")
         )
         return
     
-    # 学習処理
-    learned_msg = learn_from_message(text)
-    if learned_msg:
+    # 知識を学習
+    key, val = extract_knowledge(txt)
+    if key and val:
+        knowledge_base[key] = val
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=learned_msg)
+            TextSendMessage(text=f"「{key}」→「{val}」覚えたよ！✨")
         )
         return
     
     # AI応答
-    reply = get_ai_response(user_id, text)
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply)
-    )
+    reply = get_ai_response(uid, txt)
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
