@@ -21,7 +21,7 @@ POST_INTERVAL = 30
 last_post_time = {}
 posting_enabled = True
 
-# === データベース ===
+# === データベース初期化 ===
 def init_db():
     try:
         conn = sqlite3.connect("board.db")
@@ -38,8 +38,9 @@ def init_db():
         """)
         conn.commit()
         conn.close()
+        print("✅ DB初期化完了")
     except Exception as e:
-        print(f"DBエラー: {e}")
+        print(f"❌ DB初期化エラー: {e}")
 
 def get_posts(limit=50):
     try:
@@ -49,7 +50,8 @@ def get_posts(limit=50):
         posts = c.fetchall()
         conn.close()
         return [{"id": p[0], "name": p[1], "title": p[2], "body": p[3], "time": p[4]} for p in posts]
-    except:
+    except Exception as e:
+        print(f"❌ 取得エラー: {e}")
         return []
 
 def add_post(user_id, user_name, title, body):
@@ -57,14 +59,16 @@ def add_post(user_id, user_name, title, body):
         conn = sqlite3.connect("board.db")
         c = conn.cursor()
         now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-        c.execute("""
-            INSERT INTO posts (user_id, user_name, title, body, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (user_id, user_name, title, body, now))
+        c.execute(
+            "INSERT INTO posts (user_id, user_name, title, body, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, user_name, title, body, now)
+        )
         conn.commit()
         conn.close()
+        print(f"✅ 投稿成功: {title}")
         return True
-    except:
+    except Exception as e:
+        print(f"❌ 投稿エラー: {e}")
         return False
 
 def delete_post(post_id, user_id, is_admin=False):
@@ -75,18 +79,20 @@ def delete_post(post_id, user_id, is_admin=False):
             c.execute("DELETE FROM posts WHERE id = ?", (post_id,))
         else:
             c.execute("DELETE FROM posts WHERE id = ? AND user_id = ?", (post_id, user_id))
-        affected = c.rowcount
+        ok = c.rowcount > 0
         conn.commit()
         conn.close()
-        return affected > 0
+        return ok
     except:
         return False
 
 def get_user_name(uid):
     try:
-        return line_bot_api.get_profile(uid).display_name
-    except:
-        return "名無しさん"
+        profile = line_bot_api.get_profile(uid)
+        return profile.display_name
+    except Exception as e:
+        print(f"⚠️ ユーザー名取得エラー: {e}")
+        return "投稿者"
 
 def is_admin(uid):
     return bool(ADMIN_USER_ID) and uid == ADMIN_USER_ID
@@ -110,34 +116,27 @@ HTML = """
     <title>🌐 公開掲示板</title>
     <style>
         *{box-sizing:border-box;margin:0;padding:0}
-        body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;
-            max-width:750px;margin:0 auto;padding:20px;background:linear-gradient(135deg,#e8f4ff,#f0fff4);min-height:100vh}
-        h1{text-align:center;color:#2d3748;margin-bottom:25px;font-size:1.6em}
-        .post{background:#fff;margin-bottom:15px;padding:18px;border-radius:16px;
-            box-shadow:0 4px 12px rgba(0,0,0,0.08)}
-        .title{font-weight:bold;font-size:1.1em;color:#2b6cb0;margin-bottom:6px}
-        .meta{color:#718096;font-size:0.85em;margin-bottom:10px;display:flex;justify-content:space-between}
-        .body{color:#2d3748;line-height:1.7;white-space:pre-wrap}
-        .empty{text-align:center;color:#718096;padding:50px 20px}
-        .info{background:#ebf8ff;border-left:4px solid #3182ce;padding:12px 15px;
-            border-radius:8px;margin-bottom:20px;color:#2c5282;font-size:0.9em}
+        body{font-family:sans-serif;max-width:750px;margin:0 auto;padding:20px;background:#e8f4ff}
+        h1{text-align:center;color:#2d3748;margin-bottom:20px}
+        .post{background:#fff;margin:10px 0;padding:15px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.1)}
+        .title{font-weight:bold;color:#2b6cb0;margin-bottom:5px}
+        .meta{color:#718096;font-size:0.8em;margin:5px 0 10px}
+        .body{line-height:1.6;white-space:pre-wrap}
+        .empty{text-align:center;color:#718096;padding:40px}
     </style>
 </head>
 <body>
     <h1>🌐 公開掲示板</h1>
-    <div class="info">
-        💬 LINE Botから「/投稿 タイトル｜内容」で書き込めます
-    </div>
     {% if posts %}
         {% for p in posts %}
         <div class="post">
             <div class="title">{{p.title}}</div>
-            <div class="meta"><span>{{p.name}}</span><span>{{p.time}}</span></div>
+            <div class="meta">{{p.name}} ・ {{p.time}}</div>
             <div class="body">{{p.body}}</div>
         </div>
         {% endfor %}
     {% else %}
-        <div class="empty">まだ投稿がありません</div>
+        <p class="empty">まだ投稿がありません</p>
     {% endif %}
 </body>
 </html>
@@ -145,8 +144,7 @@ HTML = """
 
 @app.route("/")
 def index():
-    posts = get_posts()
-    return render_template_string(HTML, posts=posts)
+    return render_template_string(HTML, posts=get_posts())
 
 @app.route("/callback", methods=["POST"])
 def callback():
@@ -179,45 +177,46 @@ def handle_message(event):
         else:
             title = "無題"
             body = content
-        if not body.strip():
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="📝 例：/投稿 タイトル｜内容"))
+        body = body.strip()
+        if not body:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 内容が空です\n例：/投稿 タイトル｜本文"))
             return
 
         name = get_user_name(uid)
-        if add_post(uid, name, title.strip(), body.strip()):
+        if add_post(uid, name, title.strip(), body):
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=f"✅ 投稿完了！\n【{title}】\n{name}さん\n\n公開URL：\n{request.url_root}")
+                TextSendMessage(text=f"✅ 投稿完了！\n【{title}】\n{name}さん\n\nhttps://line-bot-7jd4.onrender.com/")
             )
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 投稿に失敗しました"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 投稿に失敗しました。しばらくしてから再試行してください"))
         return
 
     if txt.startswith("/削除 "):
         try:
-            post_id = int(txt[4:].strip())
+            pid = int(txt[4:].strip())
         except:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 番号を指定してください"))
             return
-        if delete_post(post_id, uid, is_adm):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🗑️ 削除しました"))
-        else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 削除できません"))
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="🗑️ 削除しました" if delete_post(pid, uid, is_adm) else "❌ 削除できません")
+        )
         return
 
     if is_adm:
         if txt == "/投稿停止":
             posting_enabled = False
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔕 投稿を停止しました"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔕 投稿停止"))
             return
         if txt == "/投稿再開":
             posting_enabled = True
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔔 投稿を再開しました"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔔 投稿再開"))
             return
 
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text="🌐 公開掲示板\n\n/投稿 タイトル｜内容 → 書き込み\n/削除 番号 → 削除")
+        TextSendMessage(text="🌐 掲示板\n\n/投稿 タイトル｜内容\n→ 投稿できます！")
     )
 
 if __name__ == "__main__":
