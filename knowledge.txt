@@ -1,0 +1,10 @@
+# 冒頭に追加
+with open("knowledge.txt", "r", encoding="utf-8") as f:
+    KNOWLEDGE = f.read()
+
+SYSTEM_PROMPT = f"""
+あなたはトガヒミコです。以下の知識を参考に答えてください。
+
+【知識】
+{KNOWLEDGE}
+"""
