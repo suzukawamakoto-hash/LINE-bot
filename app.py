@@ -1,67 +1,152 @@
-from flask import Flask, request, abort, render_template_string
+from flask import Flask, request, render_template_string, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
+# === 環境変数 ===
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET")
+# 管理者にする人のLINE User IDをここに入れる
+ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID", "")
 
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
-posts = []  # 掲示板データ
+# === 投稿制限設定 ===
+POST_INTERVAL = 30  # 同じ人は30秒以上間隔を空ける
+last_post_time = {}
+posting_enabled = True  # 投稿停止スイッチ
 
-# ウェブページテンプレート
+# === データベース初期化 ===
+def init_db():
+    conn = sqlite3.connect("board.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            user_name TEXT NOT NULL,
+            title TEXT DEFAULT '無題',
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_posts(limit=50):
+    conn = sqlite3.connect("board.db")
+    c = conn.cursor()
+    c.execute("SELECT id, user_name, title, body, created_at FROM posts ORDER BY id DESC LIMIT ?", (limit,))
+    posts = c.fetchall()
+    conn.close()
+    return [{"id": p[0], "name": p[1], "title": p[2], "body": p[3], "time": p[4]} for p in posts]
+
+def add_post(user_id, user_name, title, body):
+    conn = sqlite3.connect("board.db")
+    c = conn.cursor()
+    now = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    c.execute("""
+        INSERT INTO posts (user_id, user_name, title, body, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, user_name, title, body, now))
+    conn.commit()
+    conn.close()
+    return True
+
+def delete_post(post_id, user_id, is_admin=False):
+    conn = sqlite3.connect("board.db")
+    c = conn.cursor()
+    if is_admin:
+        c.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+    else:
+        c.execute("DELETE FROM posts WHERE id = ? AND user_id = ?", (post_id, user_id))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0
+
+def get_user_name(uid):
+    try:
+        return line_bot_api.get_profile(uid).display_name
+    except:
+        return "名無しさん"
+
+def is_admin(uid):
+    return uid == ADMIN_USER_ID
+
+def can_post(uid):
+    global last_post_time
+    now = datetime.now()
+    if uid in last_post_time:
+        if now - last_post_time[uid] < timedelta(seconds=POST_INTERVAL):
+            return False
+    last_post_time[uid] = now
+    return True
+
+# === ウェブページ ===
 HTML = """
 <!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>ネット掲示板</title>
+    <title>🌐 公開掲示板</title>
     <style>
-        body{font-family:sans-serif;max-width:700px;margin:0 auto;padding:20px;background:#f5f5f5}
-        h1{text-align:center;color:#222}
-        .post{background:white;margin:10px 0;padding:15px;border-radius:10px;box-shadow:0 2px 4px #0001}
-        .title{font-weight:bold;font-size:1.1em;color:#2c3e50}
-        .meta{color:#777;font-size:0.85em;margin:5px 0}
-        .body{margin-top:10px;line-height:1.6}
-        .empty{text-align:center;color:#888;padding:30px}
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;
+            max-width:750px;margin:0 auto;padding:20px;background:linear-gradient(135deg,#e8f4ff,#f0fff4);min-height:100vh}
+        h1{text-align:center;color:#2d3748;margin-bottom:25px;font-size:1.6em}
+        .post{background:#fff;margin-bottom:15px;padding:18px;border-radius:16px;
+            box-shadow:0 4px 12px rgba(0,0,0,0.08);transition:transform 0.2s}
+        .post:hover{transform:translateY(-2px)}
+        .title{font-weight:bold;font-size:1.1em;color:#2b6cb0;margin-bottom:6px}
+        .meta{color:#718096;font-size:0.85em;margin-bottom:10px;display:flex;justify-content:space-between}
+        .body{color:#2d3748;line-height:1.7;white-space:pre-wrap}
+        .empty{text-align:center;color:#718096;padding:50px 20px}
+        .info{background:#ebf8ff;border-left:4px solid #3182ce;padding:12px 15px;
+            border-radius:8px;margin-bottom:20px;color:#2c5282;font-size:0.9em}
+        footer{text-align:center;margin-top:40px;color:#a0aec0;font-size:0.8em}
     </style>
 </head>
 <body>
     <h1>🌐 公開掲示板</h1>
+    <div class="info">
+        💬 LINE Botから「/投稿 タイトル｜内容」で書き込めます<br>
+        🔒 データは永久保存されます
+    </div>
     {% if posts %}
-        {% for p in posts|reverse %}
+        {% for p in posts %}
         <div class="post">
             <div class="title">{{p.title}}</div>
-            <div class="meta">{{p.name}} ・ {{p.time}}</div>
+            <div class="meta">
+                <span>{{p.name}}</span>
+                <span>{{p.time}}</span>
+            </div>
             <div class="body">{{p.body}}</div>
         </div>
         {% endfor %}
     {% else %}
-        <p class="empty">まだ投稿がありません。LINE Botから投稿しよう！</p>
+        <div class="empty">
+            まだ投稿がありません<br>LINE Botから最初の投稿をしてみましょう✨
+        </div>
     {% endif %}
+    <footer>Powered by LINE Bot + Render</footer>
 </body>
 </html>
 """
 
-def get_name(uid):
-    try:
-        return line_bot_api.get_profile(uid).display_name
-    except:
-        return "名無し"
-
-# ウェブ公開ページ
 @app.route("/")
 def index():
+    posts = get_posts()
     return render_template_string(HTML, posts=posts)
 
-# LINE Webhook
+# === LINE Webhook ===
 @app.route("/callback", methods=["POST"])
 def callback():
     sig = request.headers.get("X-Line-Signature", "")
@@ -73,30 +158,91 @@ def callback():
     return "OK"
 
 @handler.add(MessageEvent, message=TextMessage)
-def handle(event):
+def handle_message(event):
+    global posting_enabled
     uid = event.source.user_id
     txt = event.message.text.strip()
+    is_adm = is_admin(uid)
 
+    # === 投稿 ===
     if txt.startswith("/投稿 "):
+        if not posting_enabled and not is_adm:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="🔕 現在投稿を停止しています")
+            )
+            return
+        if not can_post(uid) and not is_adm:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="⏳ 連投を制限しています。少し時間をおいて投稿してください")
+            )
+            return
+
         content = txt[4:].strip()
-        title, body = (content.split("｜", 1) + ["無題"])[:2]
-        name = get_name(uid)
-        now = datetime.now().strftime("%Y/%m/%d %H:%M")
-        posts.append({
-            "title": title, "body": body, "name": name, "time": now
-        })
+        if "｜" in content:
+            title, body = content.split("｜", 1)
+        else:
+            title = "無題"
+            body = content
+        if not body.strip():
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="📝 内容が空です。例：/投稿 お知らせ｜掲示板公開しました！")
+            )
+            return
+
+        name = get_user_name(uid)
+        add_post(uid, name, title.strip(), body.strip())
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=f"✅ 投稿しました！\n公開URL：\n{request.url_root}")
+            TextSendMessage(text=f"✅ 投稿完了！\n【{title}】\n{name}さん\n\n公開URL：\n{request.url_root}")
         )
         return
 
+    # === 削除（自分の投稿）===
+    if txt.startswith("/削除 "):
+        try:
+            post_id = int(txt[4:].strip())
+        except:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 番号を指定してください"))
+            return
+        if delete_post(post_id, uid, is_adm):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🗑️ 削除しました"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 削除できません（権限がないか存在しません）"))
+        return
+
+    # === 管理者：投稿停止/再開 ===
+    if is_adm:
+        if txt == "/投稿停止":
+            posting_enabled = False
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔕 投稿を停止しました"))
+            return
+        if txt == "/投稿再開":
+            posting_enabled = True
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🔔 投稿を再開しました"))
+            return
+        if txt == "/管理者":
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="🔧 管理者コマンド\n"
+                    "/投稿停止 → 一般の投稿を止める\n"
+                    "/投稿再開 → 再開\n"
+                    "/削除 番号 → 任意の投稿を削除")
+            )
+            return
+
+    # === ヘルプ ===
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text="🌐 掲示板Bot\n\n"
-            "/投稿 タイトル｜内容\n→ ウェブに公開されます！")
+        TextSendMessage(text="🌐 公開掲示板\n\n"
+            "/投稿 タイトル｜内容 → 書き込み\n"
+            "/削除 番号 → 自分の投稿を削除\n\n"
+            "🔒 データは永久保存されます！")
     )
 
 if __name__ == "__main__":
+    init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
