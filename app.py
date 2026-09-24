@@ -58,10 +58,12 @@ def get_ai_response(user_id, user_message):
     try:
         # OpenAIに問い合わせ
         response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=user_sessions[user_id],
-            temperature=0.7,
-            max_tokens=800
+    model="gpt-3.5-turbo",
+    messages=user_sessions[user_id],
+    temperature=0.9,        # 明るく自由な感じ
+    max_tokens=1200         # 長めに詳しく答える
+)
+
         )
         ai_reply = response.choices[0].message.content.strip()
         user_sessions[user_id].append({"role": "assistant", "content": ai_reply})
