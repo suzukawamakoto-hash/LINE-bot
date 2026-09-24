@@ -29,28 +29,27 @@ SYSTEM_PROMPT = """
 """
 
 def extract_knowledge(text):
-    """教えるときの形だけを検知：文末に「だよ」「なのだ」などがあるときだけ学習"""
-    # 質問っぽい文は除外
-    if re.search(r"[？?何誰いつどこなぜどう]", text):
-        return None, None
+    """文を分割して個別に学習"""
+    # 質問っぽい文はスキップ
+    if re.search(r"[？?何誰いつどこなぜどう教え]", text):
+        return []
     
-    # 教えるときのパターン
-    patterns = [
-        r"([^\s。]+)は(.+だ[よね]?)",
-        r"([^\s。]+)は(.+です)",
-        r"私の([^\s。]+)は(.+)",
-        r"僕の([^\s。]+)は(.+)",
-        r"俺の([^\s。]+)は(.+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text)
+    results = []
+    # 句読点や改行で分割
+    sentences = re.split(r"[。\n]", text)
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        # 「〇〇は△△」の形を検知
+        m = re.match(r".*?([^\s]+)は(.+)", sent)
         if m:
             key = m.group(1).strip()
             val = m.group(2).strip()
-            # 値が短すぎたり質問っぽかったら除外
-            if len(key) <= 30 and len(val) >= 2 and not re.search(r"[？?いつ何]", val):
-                return key, val
-    return None, None
+            if (len(key) <= 30 and len(val) >= 2 
+                and not re.search(r"[？?いつ何]", val)):
+                results.append((key, val))
+    return results
 
 def get_ai_response(user_id, msg):
     know_text = "\n".join([f"・{k}：{v}" for k, v in knowledge_base.items()])
@@ -102,17 +101,20 @@ def handle_msg(event):
         )
         return
     
-    # 教えるときだけ学習
-    key, val = extract_knowledge(txt)
-    if key and val:
-        knowledge_base[key] = val
+    # 複数の情報をまとめて学習
+    learned = extract_knowledge(txt)
+    if learned:
+        msgs = []
+        for key, val in learned:
+            knowledge_base[key] = val
+            msgs.append(f"「{key}」覚えたよ！✨")
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=f"「{key}」覚えたよ！✨")
+            TextSendMessage(text="\n".join(msgs))
         )
         return
     
-    # 質問・会話はAIに任せる
+    # AI応答
     reply = get_ai_response(uid, txt)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
