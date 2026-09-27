@@ -20,7 +20,7 @@ line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # ===== 設定 =====
-ADMIN_USER_IDS = ["Uxxxxxx"]  # 管理者のLINE ID（自分のIDを入れる）
+ADMIN_USER_IDS = ["Ubb14dba8c75028d85c7ada12a3f4177c"]  # 管理者のLINE ID（自分のIDを入れる）
 MAX_MESSAGES = 5              # 5秒間に5件以上 → スパム判定
 TIME_WINDOW = 5
 BAN_KEYWORDS = ["荒らし", "宣伝", "怪しいURL"]  # 検知ワード
