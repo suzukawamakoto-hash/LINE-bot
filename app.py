@@ -6,7 +6,7 @@ from datetime import datetime
 import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'my-secret-key-change-later')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'my-secret-key-2026')
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///bbs.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -16,14 +16,12 @@ login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'ログインしてください'
 
-# NGワードリスト（自由に追加OK）
 NG_WORDS = {"出会い", "会おう", "LINE教えて", "電話番号", "メアド"}
 
 def check_ng(text):
     text = text or ""
     return any(word in text for word in NG_WORDS)
 
-# ユーザー
 class User(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(20), unique=True, nullable=False)
@@ -41,7 +39,6 @@ class User(db.Model, UserMixin):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# 投稿
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(100), nullable=False)
@@ -49,13 +46,11 @@ class Post(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# トップページ
 @app.route('/')
 def index():
     posts = Post.query.order_by(Post.created_at.desc()).all()
     return render_template('index.html', posts=posts)
 
-# 新規登録
 @app.route('/register', methods=['GET','POST'])
 def register():
     if current_user.is_authenticated:
@@ -78,7 +73,6 @@ def register():
         return redirect(url_for('login'))
     return render_template('register.html')
 
-# ログイン
 @app.route('/login', methods=['GET','POST'])
 def login():
     if current_user.is_authenticated:
@@ -91,14 +85,12 @@ def login():
         flash('メールかパスワードが違います')
     return render_template('login.html')
 
-# ログアウト
 @app.route('/logout')
 @login_required
 def logout():
     logout_user()
     return redirect(url_for('index'))
 
-# 投稿
 @app.route('/post', methods=['GET','POST'])
 @login_required
 def create_post():
