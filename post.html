@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>新規投稿</title>
+</head>
+<body>
+  <h1>投稿する</h1>
+  {% with messages = get_flashed_messages() %}
+    {% for msg in messages %}<p style="color:red">{{ msg }}</p>{% endfor %}
+  {% endwith %}
+  <form method="post">
+    <p>タイトル：<input type="text" name="title" required style="width:300px"></p>
+    <p>内容：<textarea name="content" rows="6" cols="50" required></textarea></p>
+    <p><input type="submit" value="投稿"></p>
+  </form>
+  <p><a href="{{ url_for('index') }}">← 戻る</a></p>
+</body>
+</html>
